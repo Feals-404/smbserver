@@ -1,0 +1,86 @@
+name: Build and test on commit
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+env:
+  GO_VERSION: '1.24'
+  BINARY_NAME: smbserver
+
+jobs:
+  test:
+    name: Lint, vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout smbserver
+        uses: actions/checkout@v4
+        with:
+          path: smbserver
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: smbserver/go.sum
+
+      - name: Check formatting
+        working-directory: smbserver
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-ed:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        working-directory: smbserver
+        run: go vet ./...
+
+      - name: Test
+        working-directory: smbserver
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.os }}/${{ matrix.arch }}
+    needs: test
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, darwin]
+        arch: [amd64, arm64, 386]
+        # Exclude incompatible GOOS/GOARCH combinations.
+        exclude:
+          - os: darwin
+            arch: 386
+
+    env:
+      GO111MODULE: 'on'
+      CGO_ENABLED: '0'
+
+    steps:
+      - name: Checkout smbserver
+        uses: actions/checkout@v4
+        with:
+          path: smbserver
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: smbserver/go.sum
+
+      - name: Build binary
+        working-directory: smbserver
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p build
+          OUTPUT_PATH="build/${BINARY_NAME}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
+          go build -ldflags="-s -w" -o "$OUTPUT_PATH"

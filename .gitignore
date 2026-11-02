@@ -1,2 +1,3 @@
-/manticore-smbserver
+/smbserver
 *.txt
+/manticore-smbserver

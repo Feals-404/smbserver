@@ -1,147 +1,174 @@
-// Command smbserver serves a local directory over SMB 2/3, in the spirit of
-// impacket's smbserver.py, and prints the NetNTLM response of every logon in
-// hashcat form.
-//
-// Usage:
-//
-//	manticore-smbserver SHARE /path/to/dir [options]
-//
-// Without -u every logon is admitted as a guest, which is what a capture wants.
 package main
 
 import (
-	"encoding/hex"
 	"fmt"
 	"os"
 
-	"github.com/TheManticoreProject/Manticore/crypto/nt"
+	"github.com/TheManticoreProject/smbserver/core/server"
+	"github.com/TheManticoreProject/smbserver/core/utils"
+
 	"github.com/TheManticoreProject/Manticore/logger"
 	smb1 "github.com/TheManticoreProject/Manticore/network/smb/smb_v10/server"
-	"github.com/TheManticoreProject/Manticore/network/smb/smb_v20/server"
-	"github.com/TheManticoreProject/Manticore/windows/credentials"
 	"github.com/TheManticoreProject/goopts/parser"
 )
 
+// version is the release shown in the banner.
+const version = "1.0.0"
+
+// banner returns the smbserver ASCII art banner, with the version
+// right-justified in a 10-character field. The backticks of the art cannot
+// appear inside a raw string, so they are injected explicitly.
+func banner() string {
+	art := `               _
+ ___ _ __ ___ | |__  ___  ___ _ ____   _____ _ __
+/ __| '_ ` + "`" + ` _ \| '_ \/ __|/ _ \ '__\ \ / / _ \ '__|
+\__ \ | | | | | |_) \__ \  __/ |   \ V /  __/ |
+|___/_| |_| |_|_.__/|___/\___|_|    \_/ \___|_|
+                                      %10s`
+	return fmt.Sprintf(art, "v"+version)
+}
+
 var (
+	// Configuration
+	debug bool
+
+	// Share
 	shareName string
 	sharePath string
+	readOnly  bool
 
+	// Network
 	listenAddress string
-	listenPort    int
+	port          int
+	useNBT        bool
 	serverName    string
 
-	domain   string
-	username string
-	password string
-	hashes   string
+	// Authentication
+	authDomain   string
+	authUsername string
+	authPassword string
+	authHashes   string
 
-	readOnly          bool
+	// Protocols
+	noSMB1 bool
+	noSMB2 bool
+
+	// Security
 	requireSigning    bool
 	requireEncryption bool
-	outputFile        string
-	debug             bool
+
+	// Output
+	outputFile string
 )
 
 func parseArgs() {
-	ap := parser.ArgumentsParser{Banner: "smbserver - SMB 2/3 server - TheManticoreProject"}
+	ap := parser.ArgumentsParser{
+		Banner: banner(),
+	}
+	ap.SetOptShowBannerOnHelp(true)
+	ap.SetOptShowBannerOnRun(true)
+
+	// Configuration flags
+	ap.NewBoolArgument(&debug, "", "--debug", false, "Debug mode.")
+
+	// Share positionals
 	ap.NewStringPositionalArgument(&shareName, "shareName", "Name of the share.")
 	ap.NewStringPositionalArgument(&sharePath, "sharePath", "Local directory to serve.")
-	ap.NewBoolArgument(&debug, "", "--debug", false, "Enable debug logging.")
 
-	if group, err := ap.NewArgumentGroup("Network"); err == nil {
-		group.NewStringArgument(&listenAddress, "-ip", "--interface-address", "0.0.0.0", false, "Address to listen on.")
-		group.NewTcpPortArgument(&listenPort, "", "--port", 445, false, "TCP port to listen on.")
-		group.NewStringArgument(&serverName, "", "--server-name", "FILESRV", false, "NetBIOS name advertised to clients.")
+	// Network flags
+	group_network, err := ap.NewArgumentGroup("Network")
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+	} else {
+		group_network.NewStringArgument(&listenAddress, "-ip", "--interface-address", "0.0.0.0", false, "Address to listen on.")
+		group_network.NewTcpPortArgument(&port, "-P", "--port", 445, false, "TCP port to listen on.")
+		group_network.NewBoolArgument(&useNBT, "", "--nbt", false, "Use NetBIOS (NBT) transport instead of direct TCP.")
+		group_network.NewStringArgument(&serverName, "", "--server-name", "FILESRV", false, "NetBIOS name advertised to clients.")
 	}
-	if group, err := ap.NewArgumentGroup("Authentication"); err == nil {
-		group.NewStringArgument(&domain, "-d", "--domain", "WORKGROUP", false, "Domain of the accepted account.")
-		group.NewStringArgument(&username, "-u", "--username", "", false, "Accepted account. Without it every logon is a guest.")
-		group.NewStringArgument(&password, "-p", "--password", "", false, "Password of the accepted account.")
-		group.NewStringArgument(&hashes, "-H", "--hashes", "", false, "NT hash of the accepted account, as LMhash:NThash or NThash.")
+
+	// Authentication flags
+	group_auth, err := ap.NewArgumentGroup("Authentication")
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+	} else {
+		group_auth.NewStringArgument(&authDomain, "-d", "--domain", "WORKGROUP", false, "Domain of the served account.")
+		group_auth.NewStringArgument(&authUsername, "-u", "--user", "", false, "Served account. Supports DOMAIN\\user. Without it every logon is a guest.")
+		group_auth.NewStringArgument(&authPassword, "-p", "--password", "", false, "Password of the served account.")
+		group_auth.NewStringArgument(&authHashes, "", "--hashes", "", false, "NT/LM hashes of the served account, format is [LMhash:]NThash.")
 	}
-	if group, err := ap.NewArgumentGroup("Security"); err == nil {
-		group.NewBoolArgument(&readOnly, "", "--read-only", false, "Refuse every modification.")
-		group.NewBoolArgument(&requireSigning, "", "--require-signing", false, "Refuse unsigned sessions.")
-		group.NewBoolArgument(&requireEncryption, "", "--require-encryption", false, "Encrypt every session (SMB 3.x clients only).")
-		group.NewStringArgument(&outputFile, "-o", "--output-file", "", false, "Append captured hashes to this file.")
+
+	// Protocol flags
+	group_protocols, err := ap.NewArgumentGroup("Protocols")
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+	} else {
+		group_protocols.NewBoolArgument(&noSMB1, "", "--no-smb1", false, "Do not serve SMB1 clients.")
+		group_protocols.NewBoolArgument(&noSMB2, "", "--no-smb2", false, "Do not serve SMB 2/3 clients.")
 	}
+
+	// Security flags
+	group_security, err := ap.NewArgumentGroup("Security")
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+	} else {
+		group_security.NewBoolArgument(&readOnly, "", "--read-only", false, "Refuse every modification.")
+		group_security.NewBoolArgument(&requireSigning, "", "--require-signing", false, "Refuse unsigned sessions.")
+		group_security.NewBoolArgument(&requireEncryption, "", "--require-encryption", false, "Encrypt every session (SMB 3.x only, implies --no-smb1).")
+	}
+
+	// Output flags
+	group_output, err := ap.NewArgumentGroup("Output")
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+	} else {
+		group_output.NewStringArgument(&outputFile, "-o", "--output-file", "", false, "Append captured hashes to this file, in hashcat format.")
+	}
+
 	ap.Parse()
 }
 
 func main() {
 	parseArgs()
+
 	logger.SetLevel(logger.LevelInfo)
 	if debug {
 		logger.SetLevel(logger.LevelDebug)
 	}
-	if err := run(); err != nil {
-		logger.Errorf("%v", err)
-		os.Exit(1)
-	}
-}
 
-func run() error {
-	config := server.Config{
+	options := server.Options{
+		ShareName:         shareName,
+		SharePath:         sharePath,
+		ReadOnly:          readOnly,
+		ListenAddress:     listenAddress,
+		Port:              port,
+		UseNBT:            useNBT,
 		ServerName:        serverName,
-		DomainName:        domain,
-		DNSComputerName:   serverName,
-		DNSDomainName:     domain,
-		AllowGuest:        username == "",
-		AllowAnonymous:    username == "",
+		Domain:            authDomain,
 		RequireSigning:    requireSigning,
 		RequireEncryption: requireEncryption,
+		EnableSMB1:        !noSMB1 && !requireEncryption,
+		EnableSMB2:        !noSMB2,
+		OutputFile:        outputFile,
 	}
-	if username != "" {
-		ntHash, err := accountHash()
+
+	// Accept DOMAIN\user and DOMAIN/user; the embedded domain overrides -d.
+	if authUsername != "" {
+		domain, username := utils.SplitDomainUsername(authDomain, authUsername)
+		ntHash, err := utils.AccountHash(authPassword, authHashes)
 		if err != nil {
-			return err
+			logger.Error(fmt.Sprintf("Invalid credentials: %s", err))
+			os.Exit(1)
 		}
-		config.Authenticator = smb1.StaticAccounts(smb1.Account{Domain: domain, Username: username, NTHash: ntHash})
+		options.Account = &smb1.Account{Domain: domain, Username: username, NTHash: ntHash}
 	}
 
-	srv, err := server.NewServer(config)
+	srv, err := server.NewServer(options)
 	if err != nil {
-		return err
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
-
-	// Harvest every NTLM response and append it to the output file. Known
-	// accounts are still served (pass-through); the rest fall to the guest or
-	// logon-failure policy above.
-	capture, err := server.NewCaptureHandler(server.CaptureConfig{
-		CaptureConfig: smb1.CaptureConfig{OutputFile: outputFile, UniquePerUser: true},
-		PassThrough:   true,
-	})
-	if err != nil {
-		return err
+	if err := srv.ListenAndServe(); err != nil {
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
-	srv.RegisterHandler(capture)
-	fs, err := smb1.NewLocalFileSystem(sharePath, shareName)
-	if err != nil {
-		return err
-	}
-	fs.SetReadOnly(readOnly)
-	if err := srv.AddShare(&server.Share{Name: shareName, FS: fs, ReadOnly: readOnly}); err != nil {
-		return err
-	}
-
-	logger.Infof("Serving %s as \\\\%s\\%s", sharePath, serverName, shareName)
-	return srv.ListenAndServe(fmt.Sprintf("%s:%d", listenAddress, listenPort))
-}
-
-// accountHash returns the NT hash of the accepted account.
-func accountHash() ([16]byte, error) {
-	var ntHash [16]byte
-	if hashes == "" {
-		return nt.NTHash(password), nil
-	}
-	_, ntHex, err := credentials.ParseLMNTHashes(hashes)
-	if err != nil {
-		return ntHash, err
-	}
-	decoded, err := hex.DecodeString(ntHex)
-	if err != nil || len(decoded) != len(ntHash) {
-		return ntHash, fmt.Errorf("invalid NT hash %q", ntHex)
-	}
-	copy(ntHash[:], decoded)
-	return ntHash, nil
 }

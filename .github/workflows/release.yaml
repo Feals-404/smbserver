@@ -1,0 +1,58 @@
+name: Build and Release
+
+on:
+  release:
+    types: [published]
+
+env:
+  GO_VERSION: '1.24'
+  BINARY_NAME: smbserver
+
+jobs:
+  build:
+    name: Build and upload ${{ matrix.os }}/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, darwin]
+        arch: [amd64, arm64, 386]
+        # Exclude incompatible GOOS/GOARCH combinations.
+        exclude:
+          - os: darwin
+            arch: 386
+
+    env:
+      GO111MODULE: 'on'
+      CGO_ENABLED: '0'
+
+    steps:
+      - name: Checkout smbserver
+        uses: actions/checkout@v4
+        with:
+          path: smbserver
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: smbserver/go.sum
+
+      - name: Build binary
+        working-directory: smbserver
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p release
+          OUTPUT_PATH="release/${BINARY_NAME}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
+          go build -ldflags="-s -w" -o "$OUTPUT_PATH"
+
+      - name: Upload the release binaries
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref }}
+          file: smbserver/release/${{ env.BINARY_NAME }}-*
+          file_glob: true
