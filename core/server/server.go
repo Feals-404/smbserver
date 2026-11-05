@@ -42,6 +42,18 @@ type Options struct {
 	ServerName string
 	Domain     string
 
+	// DNSComputerName and DNSDomainName are the fully-qualified names advertised
+	// in the NTLM challenge's target info. Empty falls back to ServerName/Domain,
+	// which reuses the NetBIOS names — a tell that the host is synthetic.
+	DNSComputerName string
+	DNSDomainName   string
+
+	// NativeOS and NativeLanMan override the SMB1 session-setup strings, which
+	// Manticore otherwise fixes to a Windows Server 2012 R2 value. SMB2 has no
+	// such field. Empty keeps Manticore's default.
+	NativeOS     string
+	NativeLanMan string
+
 	// Account is the account served. Nil admits every logon as a guest, which is
 	// what a capture wants.
 	Account *smb1.Account
@@ -137,6 +149,17 @@ func NewServer(options Options) (*Server, error) {
 	}
 	guest := options.Account == nil
 
+	// Fall back to the NetBIOS names for the DNS forms, matching the old
+	// behaviour; a caller that cares about OPSEC sets real FQDNs.
+	dnsComputer := options.DNSComputerName
+	if dnsComputer == "" {
+		dnsComputer = options.ServerName
+	}
+	dnsDomain := options.DNSDomainName
+	if dnsDomain == "" {
+		dnsDomain = options.Domain
+	}
+
 	// onAccept steers each NTLM exchange — a fixed challenge, an advertised
 	// version — and is set on both protocols so a captured response and the
 	// server's fingerprint are identical whichever a client speaks.
@@ -172,8 +195,10 @@ func NewServer(options Options) (*Server, error) {
 		s.smb1, err = smb1.NewServer(smb1.Config{
 			ServerName:      options.ServerName,
 			DomainName:      options.Domain,
-			DNSComputerName: options.ServerName,
-			DNSDomainName:   options.Domain,
+			DNSComputerName: dnsComputer,
+			DNSDomainName:   dnsDomain,
+			NativeOS:        options.NativeOS,
+			NativeLanMan:    options.NativeLanMan,
 			Authenticator:   authenticator,
 			AllowGuest:      guest,
 			AllowAnonymous:  guest,
@@ -204,8 +229,8 @@ func NewServer(options Options) (*Server, error) {
 		s.smb2, err = smb2.NewServer(smb2.Config{
 			ServerName:        options.ServerName,
 			DomainName:        options.Domain,
-			DNSComputerName:   options.ServerName,
-			DNSDomainName:     options.Domain,
+			DNSComputerName:   dnsComputer,
+			DNSDomainName:     dnsDomain,
 			Authenticator:     authenticator,
 			AllowGuest:        guest,
 			AllowAnonymous:    guest,

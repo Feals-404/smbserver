@@ -48,6 +48,9 @@ var (
 	useNBT        bool
 	nbtPort       int
 	serverName    string
+	dnsName       string
+	dnsDomain     string
+	nativeOS      string
 
 	// Authentication
 	authDomain   string
@@ -99,6 +102,9 @@ func parseArgs() {
 		group_network.NewBoolArgument(&useNBT, "", "--nbt", false, "Also listen for NetBIOS over TCP (Windows falls back to it).")
 		group_network.NewTcpPortArgument(&nbtPort, "", "--nbt-port", 139, false, "NetBIOS port used with --nbt.")
 		group_network.NewStringArgument(&serverName, "", "--server-name", "FILESRV", false, "NetBIOS name advertised to clients.")
+		group_network.NewStringArgument(&dnsName, "", "--dns-name", "", false, "FQDN advertised in the NTLM challenge (default: the NetBIOS name).")
+		group_network.NewStringArgument(&dnsDomain, "", "--dns-domain", "", false, "DNS domain advertised in the NTLM challenge (default: the domain).")
+		group_network.NewStringArgument(&nativeOS, "", "--native-os", "", false, "SMB1 \"native OS\" string (default: a Windows Server 2012 R2 value).")
 	}
 
 	// Authentication flags
@@ -187,6 +193,9 @@ func main() {
 		NBTPort:           nbt,
 		ServerName:        serverName,
 		Domain:            authDomain,
+		DNSComputerName:   dnsName,
+		DNSDomainName:     dnsDomain,
+		NativeOS:          nativeOS,
 		RequireSigning:    requireSigning,
 		RequireEncryption: requireEncryption,
 		EnableSMB1:        !noSMB1 && !requireEncryption,
