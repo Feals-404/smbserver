@@ -88,6 +88,8 @@ type Server struct {
 	smb1    *smb1.Server
 	smb2    *smb2.Server
 
+	capture *smb2.CaptureHandler
+
 	mu        sync.Mutex
 	listeners []transport.Listener
 	closed    bool
@@ -161,7 +163,7 @@ func NewServer(options Options) (*Server, error) {
 		}
 	}
 
-	s := &Server{options: options}
+	s := &Server{options: options, capture: capture}
 	if options.EnableSMB1 {
 		signing := smb1.SigningEnabled
 		if options.RequireSigning {
@@ -334,6 +336,14 @@ func (s *Server) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
+}
+
+// Captured returns the NTLM responses harvested so far, one per user.
+func (s *Server) Captured() []smb1.Credential {
+	if s.capture == nil {
+		return nil
+	}
+	return s.capture.Credentials()
 }
 
 func closeAll(listeners []transport.Listener) {

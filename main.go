@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/TheManticoreProject/smbserver/core/server"
 	"github.com/TheManticoreProject/smbserver/core/utils"
@@ -234,8 +236,35 @@ func main() {
 		logger.Error(err.Error())
 		os.Exit(1)
 	}
-	if err := srv.ListenAndServe(); err != nil {
-		logger.Error(err.Error())
+
+	// Ctrl-C (or SIGTERM) stops the server cleanly and prints a recap.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		logger.Info("Shutting down.")
+		srv.Close()
+	}()
+
+	serveErr := srv.ListenAndServe()
+	summarize(srv.Captured())
+	if serveErr != nil {
+		logger.Error(serveErr.Error())
 		os.Exit(1)
+	}
+}
+
+// summarize lists the accounts captured during the run, once each.
+func summarize(creds []smb1.Credential) {
+	if len(creds) == 0 {
+		return
+	}
+	logger.Infof("Captured %d account(s):", len(creds))
+	for _, c := range creds {
+		kind := "NetNTLMv1"
+		if c.IsNTLMv2() {
+			kind = "NetNTLMv2"
+		}
+		logger.Infof("  %s (%s) from %s", c.Account(), kind, c.RemoteAddr)
 	}
 }

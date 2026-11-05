@@ -47,6 +47,7 @@ func serveTestServer(t *testing.T) (int, string) {
 		t.Fatal(err)
 	}
 	go srv.ListenAndServe()
+	t.Cleanup(srv.Close) // also asserts Close returns without hanging
 
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	for i := 0; i < 100; i++ {
