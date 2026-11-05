@@ -1,3 +1,6 @@
 /smbserver
 *.txt
 /manticore-smbserver
+
+# ruflo local database
+/ruvector.db

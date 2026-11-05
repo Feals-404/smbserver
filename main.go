@@ -52,13 +52,19 @@ var (
 	// Protocols
 	noSMB1 bool
 	noSMB2 bool
+	browse bool
 
 	// Security
 	requireSigning    bool
 	requireEncryption bool
 
+	// Capture
+	challenge string
+	osVersion string
+
 	// Output
 	outputFile string
+	logAccess  bool
 )
 
 func parseArgs() {
@@ -104,6 +110,7 @@ func parseArgs() {
 	} else {
 		group_protocols.NewBoolArgument(&noSMB1, "", "--no-smb1", false, "Do not serve SMB1 clients.")
 		group_protocols.NewBoolArgument(&noSMB2, "", "--no-smb2", false, "Do not serve SMB 2/3 clients.")
+		group_protocols.NewBoolArgument(&browse, "", "--browse", false, "Serve IPC$ so clients can list the share (net view, smbclient -L; SMB1 only).")
 	}
 
 	// Security flags
@@ -116,12 +123,22 @@ func parseArgs() {
 		group_security.NewBoolArgument(&requireEncryption, "", "--require-encryption", false, "Encrypt every session (SMB 3.x only, implies --no-smb1).")
 	}
 
+	// Capture flags
+	group_capture, err := ap.NewArgumentGroup("Capture")
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+	} else {
+		group_capture.NewStringArgument(&challenge, "", "--challenge", "", false, "Fix the 8-byte NTLM server challenge (16 hex), to crack responses against a precomputed table.")
+		group_capture.NewStringArgument(&osVersion, "", "--os-version", "", false, "Advertise this Windows version (major.minor.build) in the NTLM challenge, to look like a real host.")
+	}
+
 	// Output flags
 	group_output, err := ap.NewArgumentGroup("Output")
 	if err != nil {
 		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
 	} else {
 		group_output.NewStringArgument(&outputFile, "-o", "--output-file", "", false, "Append captured hashes to this file, in hashcat format.")
+		group_output.NewBoolArgument(&logAccess, "", "--log-access", false, "Log every file a client opens (who, path, read or write).")
 	}
 
 	ap.Parse()
@@ -157,6 +174,25 @@ func main() {
 		EnableSMB1:        !noSMB1 && !requireEncryption,
 		EnableSMB2:        !noSMB2,
 		OutputFile:        outputFile,
+		Browsable:         browse,
+		LogFileAccess:     logAccess,
+	}
+
+	if challenge != "" {
+		parsed, err := utils.ParseChallenge(challenge)
+		if err != nil {
+			logger.Error(err.Error())
+			os.Exit(1)
+		}
+		options.Challenge = parsed
+	}
+	if osVersion != "" {
+		parsed, err := utils.ParseOSVersion(osVersion)
+		if err != nil {
+			logger.Error(err.Error())
+			os.Exit(1)
+		}
+		options.AdvertiseVersion = parsed
 	}
 
 	// Accept DOMAIN\user and DOMAIN/user; the embedded domain overrides -d.

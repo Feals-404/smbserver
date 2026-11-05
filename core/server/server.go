@@ -6,12 +6,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/TheManticoreProject/Manticore/crypto/spnego"
+	"github.com/TheManticoreProject/Manticore/crypto/spnego/ntlm/version"
 	"github.com/TheManticoreProject/Manticore/logger"
 	"github.com/TheManticoreProject/Manticore/network/smb/common/transport"
 	smb1message "github.com/TheManticoreProject/Manticore/network/smb/smb_v10/message"
 	smb1commands "github.com/TheManticoreProject/Manticore/network/smb/smb_v10/message/commands"
 	smb1codes "github.com/TheManticoreProject/Manticore/network/smb/smb_v10/message/commands/codes"
 	smb1 "github.com/TheManticoreProject/Manticore/network/smb/smb_v10/server"
+	"github.com/TheManticoreProject/Manticore/network/smb/smb_v10/server/rpcpipe"
 	smb2 "github.com/TheManticoreProject/Manticore/network/smb/smb_v20/server"
 )
 
@@ -33,6 +36,25 @@ type Options struct {
 
 	RequireSigning    bool
 	RequireEncryption bool
+
+	// Challenge fixes the 8-byte NTLM server challenge instead of drawing a fresh
+	// random one per logon. A fixed challenge lets a captured NetNTLM response be
+	// cracked against a precomputed table (e.g. crack.sh for NetNTLMv1). Nil keeps
+	// a fresh random challenge, which is the safe default.
+	Challenge *[8]byte
+
+	// AdvertiseVersion, when set, is the Windows version announced in the NTLM
+	// CHALLENGE. A real Windows host always sends one; omitting it (nil) is a tell
+	// that the server is synthetic.
+	AdvertiseVersion *version.Version
+
+	// Browsable serves an IPC$ share answering srvsvc/wkssvc over SMB1, so a
+	// client can list the share with `net view`, `smbclient -L` or Explorer.
+	Browsable bool
+
+	// LogFileAccess logs every file a client opens (who, path, read or write), so
+	// a payload pulled from the share or a file dropped on it is recorded.
+	LogFileAccess bool
 
 	EnableSMB1 bool
 	EnableSMB2 bool
@@ -93,6 +115,22 @@ func NewServer(options Options) (*Server, error) {
 	}
 	guest := options.Account == nil
 
+	// onAccept steers each NTLM exchange — a fixed challenge, an advertised
+	// version — and is set on both protocols so a captured response and the
+	// server's fingerprint are identical whichever a client speaks.
+	var onAccept func(*spnego.AcceptContext)
+	if options.Challenge != nil || options.AdvertiseVersion != nil {
+		challenge, advertiseVersion := options.Challenge, options.AdvertiseVersion
+		onAccept = func(accept *spnego.AcceptContext) {
+			if challenge != nil {
+				accept.ServerChallenge = *challenge
+			}
+			if advertiseVersion != nil {
+				accept.Version = advertiseVersion
+			}
+		}
+	}
+
 	s := &Server{options: options}
 	if options.EnableSMB1 {
 		signing := smb1.SigningEnabled
@@ -108,14 +146,30 @@ func NewServer(options Options) (*Server, error) {
 			AllowGuest:      guest,
 			AllowAnonymous:  guest,
 			SigningPolicy:   signing,
+			OnAcceptContext: onAccept,
 		})
 		if err != nil {
 			return nil, err
 		}
 		s.smb1.RegisterHandler(passThroughCapture(capture.CaptureHandler))
+		if options.LogFileAccess {
+			s.smb1.RegisterHandler(logSMB1FileAccess())
+		}
 		share := &smb1.Share{Name: options.ShareName, Type: smb1.ShareTypeDisk, FS: fs, ReadOnly: options.ReadOnly}
 		if err := s.smb1.AddShare(share); err != nil {
 			return nil, err
+		}
+		if options.Browsable {
+			// An IPC$ share answering srvsvc/wkssvc is what a client lists shares
+			// over; the SMB2 server has no pipe stack, so browsing is SMB1-only.
+			ipc := &smb1.Share{
+				Name:  "IPC$",
+				Type:  smb1.ShareTypeNamedPipe,
+				Pipes: rpcpipe.ForServer(s.smb1, rpcpipe.Options{ServerName: options.ServerName, DomainName: options.Domain}),
+			}
+			if err := s.smb1.AddShare(ipc); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if options.EnableSMB2 {
@@ -129,9 +183,13 @@ func NewServer(options Options) (*Server, error) {
 			AllowAnonymous:    guest,
 			RequireSigning:    options.RequireSigning,
 			RequireEncryption: options.RequireEncryption,
+			OnAcceptContext:   onAccept,
 		})
 		if err != nil {
 			return nil, err
+		}
+		if options.LogFileAccess {
+			s.smb2.RegisterHandler(logSMB2FileAccess())
 		}
 		s.smb2.RegisterHandler(capture)
 		// ponytail: the SMB1 and SMB2 shares are separate, so byte-range locks
@@ -150,7 +208,9 @@ func (s *Server) ListenAndServe() error {
 	var listener transport.Listener
 	var err error
 	if s.options.UseNBT {
-		listener, err = transport.ListenNBT(addr, []string{s.options.ServerName})
+		// nil answers to any CALLED name, so a client coerced to \\anything\share
+		// over NetBIOS still reaches the server.
+		listener, err = transport.ListenNBT(addr, nil)
 	} else {
 		listener, err = transport.ListenTCP(addr)
 	}
