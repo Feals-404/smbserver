@@ -3,6 +3,8 @@ package server
 import (
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 
 	"github.com/TheManticoreProject/Manticore/logger"
 	"github.com/TheManticoreProject/Manticore/network/smb/common/transport"
@@ -55,6 +57,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.RequireEncryption && options.EnableSMB1 {
 		return nil, fmt.Errorf("SMB1 has no encryption, disable it to require encryption")
 	}
+	if options.Account == nil && (options.RequireSigning || options.RequireEncryption) {
+		return nil, fmt.Errorf("--require-signing and --require-encryption need an account (-u): a guest session derives no key to sign or encrypt with")
+	}
 
 	fs, err := smb1.NewLocalFileSystem(options.SharePath, options.ShareName)
 	if err != nil {
@@ -75,7 +80,16 @@ func NewServer(options Options) (*Server, error) {
 
 	var authenticator func(domain, username string) ([16]byte, bool)
 	if options.Account != nil {
-		authenticator = smb1.StaticAccounts(*options.Account)
+		account := *options.Account
+		// Match on the username only, ignoring the domain the client claims: the NT
+		// hash does not depend on the domain, so a client that guesses the wrong
+		// domain is still served. The configured domain stays display-only.
+		authenticator = func(_, username string) ([16]byte, bool) {
+			if strings.EqualFold(username, account.Username) {
+				return account.NTHash, true
+			}
+			return [16]byte{}, false
+		}
 	}
 	guest := options.Account == nil
 
@@ -132,7 +146,7 @@ func NewServer(options Options) (*Server, error) {
 
 // ListenAndServe accepts connections until the listener fails.
 func (s *Server) ListenAndServe() error {
-	addr := fmt.Sprintf("%s:%d", s.options.ListenAddress, s.options.Port)
+	addr := net.JoinHostPort(s.options.ListenAddress, strconv.Itoa(s.options.Port))
 	var listener transport.Listener
 	var err error
 	if s.options.UseNBT {
@@ -164,11 +178,18 @@ func (s *Server) serveConn(t transport.Transport, remote net.Addr) {
 	case s.smb1 == nil:
 		err = s.smb2.ServeConn(t, remote)
 	default:
+		// Bound the wait for the first frame, as each sub-server bounds its own
+		// handshake: without it a client that connects and stays silent holds a
+		// goroutine for good, because neither sub-server has seen the connection
+		// yet to time it out. Cleared once the frame is in, so the chosen
+		// sub-server applies its own read timeouts.
+		t.SetTimeout(smb2.DefaultHandshakeTimeout)
 		var first []byte
 		if first, err = t.Receive(); err != nil {
 			t.Close()
 			break
 		}
+		t.SetTimeout(0)
 		replay := &replayTransport{Transport: t, first: first}
 		protocol := route(first)
 		logger.Debug(fmt.Sprintf("Serving %s over %s", remote, protocol))

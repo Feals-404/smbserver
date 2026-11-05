@@ -81,7 +81,7 @@ func parseArgs() {
 		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
 	} else {
 		group_network.NewStringArgument(&listenAddress, "-ip", "--interface-address", "0.0.0.0", false, "Address to listen on.")
-		group_network.NewTcpPortArgument(&port, "-P", "--port", 445, false, "TCP port to listen on.")
+		group_network.NewTcpPortArgument(&port, "-P", "--port", 0, false, "TCP port to listen on (default 445, or 139 with --nbt).")
 		group_network.NewBoolArgument(&useNBT, "", "--nbt", false, "Use NetBIOS (NBT) transport instead of direct TCP.")
 		group_network.NewStringArgument(&serverName, "", "--server-name", "FILESRV", false, "NetBIOS name advertised to clients.")
 	}
@@ -133,6 +133,14 @@ func main() {
 	logger.SetLevel(logger.LevelInfo)
 	if debug {
 		logger.SetLevel(logger.LevelDebug)
+	}
+
+	// NetBIOS is served on 139 and direct TCP on 445, unless a port was given.
+	if port == 0 {
+		port = 445
+		if useNBT {
+			port = 139
+		}
 	}
 
 	options := server.Options{
