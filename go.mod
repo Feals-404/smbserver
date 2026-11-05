@@ -3,7 +3,7 @@ module github.com/TheManticoreProject/smbserver
 go 1.24.0
 
 require (
-	github.com/TheManticoreProject/Manticore v1.1.8-0.20261102143627-2d58dcacda43
+	github.com/TheManticoreProject/Manticore v1.1.8-0.20261105122039-fb5ce8a06270
 	github.com/TheManticoreProject/goopts v1.2.7
 )
 
