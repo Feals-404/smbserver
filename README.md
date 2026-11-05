@@ -99,6 +99,11 @@ A known account (`-u`) is still served while every other logon is captured and r
 - **`--disable-ess` is situational.** Whether a client sends NTLMv1 is decided by its `LmCompatibilityLevel`. A modern client (level 3, NTLMv2-only) ignores the stripped ESS and still answers NTLMv2; the downgrade only yields a crack.sh-crackable response from a client that still speaks NTLMv1 (legacy Windows, appliances, embedded SMB stacks).
 - **Browsing is SMB1-only**, since the SMB2 server has no named-pipe stack to answer srvsvc/wkssvc over IPC$.
 
+## Roadmap
+
+Planned features and the capabilities that depend on upstream Manticore changes
+are tracked in [ROADMAP.md](ROADMAP.md).
+
 ## Contributing
 
 Pull requests are welcome. Feel free to open an issue if you want to add other features.
