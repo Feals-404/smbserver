@@ -59,8 +59,9 @@ var (
 	requireEncryption bool
 
 	// Capture
-	challenge string
-	osVersion string
+	challenge  string
+	osVersion  string
+	disableESS bool
 
 	// Output
 	outputFile string
@@ -130,6 +131,7 @@ func parseArgs() {
 	} else {
 		group_capture.NewStringArgument(&challenge, "", "--challenge", "", false, "Fix the 8-byte NTLM server challenge (16 hex), to crack responses against a precomputed table.")
 		group_capture.NewStringArgument(&osVersion, "", "--os-version", "", false, "Advertise this Windows version (major.minor.build) in the NTLM challenge, to look like a real host.")
+		group_capture.NewBoolArgument(&disableESS, "", "--disable-ess", false, "Strip extended session security, so an NTLMv1 client yields a crack.sh-crackable response (use with --challenge).")
 	}
 
 	// Output flags
@@ -176,6 +178,7 @@ func main() {
 		OutputFile:        outputFile,
 		Browsable:         browse,
 		LogFileAccess:     logAccess,
+		DisableESS:        disableESS,
 	}
 
 	if challenge != "" {
