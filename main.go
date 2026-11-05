@@ -12,8 +12,9 @@ import (
 	"github.com/TheManticoreProject/goopts/parser"
 )
 
-// version is the release shown in the banner.
-const version = "1.0.0"
+// version is the release shown in the banner. It is overridden at build time
+// with -ldflags "-X main.version=<tag>" (see .github/workflows/release.yaml).
+var version = "dev"
 
 // banner returns the smbserver ASCII art banner, with the version
 // right-justified in a 10-character field. The backticks of the art cannot
@@ -85,7 +86,7 @@ func parseArgs() {
 	// Network flags
 	group_network, err := ap.NewArgumentGroup("Network")
 	if err != nil {
-		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+		logger.Warnf("Error creating ArgumentGroup: %s", err)
 	} else {
 		group_network.NewStringArgument(&listenAddress, "-ip", "--interface-address", "0.0.0.0", false, "Address to listen on.")
 		group_network.NewTcpPortArgument(&port, "-P", "--port", 0, false, "TCP port to listen on (default 445, or 139 with --nbt).")
@@ -96,7 +97,7 @@ func parseArgs() {
 	// Authentication flags
 	group_auth, err := ap.NewArgumentGroup("Authentication")
 	if err != nil {
-		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+		logger.Warnf("Error creating ArgumentGroup: %s", err)
 	} else {
 		group_auth.NewStringArgument(&authDomain, "-d", "--domain", "WORKGROUP", false, "Domain of the served account.")
 		group_auth.NewStringArgument(&authUsername, "-u", "--user", "", false, "Served account. Supports DOMAIN\\user. Without it every logon is a guest.")
@@ -107,7 +108,7 @@ func parseArgs() {
 	// Protocol flags
 	group_protocols, err := ap.NewArgumentGroup("Protocols")
 	if err != nil {
-		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+		logger.Warnf("Error creating ArgumentGroup: %s", err)
 	} else {
 		group_protocols.NewBoolArgument(&noSMB1, "", "--no-smb1", false, "Do not serve SMB1 clients.")
 		group_protocols.NewBoolArgument(&noSMB2, "", "--no-smb2", false, "Do not serve SMB 2/3 clients.")
@@ -117,7 +118,7 @@ func parseArgs() {
 	// Security flags
 	group_security, err := ap.NewArgumentGroup("Security")
 	if err != nil {
-		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+		logger.Warnf("Error creating ArgumentGroup: %s", err)
 	} else {
 		group_security.NewBoolArgument(&readOnly, "", "--read-only", false, "Refuse every modification.")
 		group_security.NewBoolArgument(&requireSigning, "", "--require-signing", false, "Refuse unsigned sessions.")
@@ -127,7 +128,7 @@ func parseArgs() {
 	// Capture flags
 	group_capture, err := ap.NewArgumentGroup("Capture")
 	if err != nil {
-		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+		logger.Warnf("Error creating ArgumentGroup: %s", err)
 	} else {
 		group_capture.NewStringArgument(&challenge, "", "--challenge", "", false, "Fix the 8-byte NTLM server challenge (16 hex), to crack responses against a precomputed table.")
 		group_capture.NewStringArgument(&osVersion, "", "--os-version", "", false, "Advertise this Windows version (major.minor.build) in the NTLM challenge, to look like a real host.")
@@ -137,7 +138,7 @@ func parseArgs() {
 	// Output flags
 	group_output, err := ap.NewArgumentGroup("Output")
 	if err != nil {
-		logger.Warn(fmt.Sprintf("Error creating ArgumentGroup: %s", err))
+		logger.Warnf("Error creating ArgumentGroup: %s", err)
 	} else {
 		group_output.NewStringArgument(&outputFile, "-o", "--output-file", "", false, "Append captured hashes to this file, in hashcat format.")
 		group_output.NewBoolArgument(&logAccess, "", "--log-access", false, "Log every file a client opens (who, path, read or write).")
@@ -203,7 +204,7 @@ func main() {
 		domain, username := utils.SplitDomainUsername(authDomain, authUsername)
 		ntHash, err := utils.AccountHash(authPassword, authHashes)
 		if err != nil {
-			logger.Error(fmt.Sprintf("Invalid credentials: %s", err))
+			logger.Errorf("Invalid credentials: %s", err)
 			os.Exit(1)
 		}
 		options.Account = &smb1.Account{Domain: domain, Username: username, NTHash: ntHash}

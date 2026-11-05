@@ -208,8 +208,11 @@ func NewServer(options Options) (*Server, error) {
 			s.smb2.RegisterHandler(logSMB2FileAccess())
 		}
 		s.smb2.RegisterHandler(capture)
-		// ponytail: the SMB1 and SMB2 shares are separate, so byte-range locks
-		// do not span protocols; share one smb1.Share if a client mixes them.
+		// Both shares wrap the same fs, so file contents are consistent across
+		// protocols. Open state is not: share modes and oplocks are tracked per
+		// server, so an exclusive open over one protocol does not block the other.
+		// That is unusual in a capture, and Manticore keeps the two Share types
+		// apart, so they are left separate.
 		share := &smb2.Share{Name: options.ShareName, FS: fs, ReadOnly: options.ReadOnly}
 		if err := s.smb2.AddShare(share); err != nil {
 			return nil, err
@@ -235,7 +238,7 @@ func (s *Server) ListenAndServe() error {
 	}
 	defer listener.Close()
 
-	logger.Info(fmt.Sprintf("Serving %s as \\\\%s\\%s on %s (%s)", s.options.SharePath, s.options.ServerName, s.options.ShareName, listener.Addr(), s.protocols()))
+	logger.Infof("Serving %s as \\\\%s\\%s on %s (%s)", s.options.SharePath, s.options.ServerName, s.options.ShareName, listener.Addr(), s.protocols())
 	for {
 		t, remote, err := listener.Accept()
 		if err != nil {
@@ -268,7 +271,7 @@ func (s *Server) serveConn(t transport.Transport, remote net.Addr) {
 		t.SetTimeout(0)
 		replay := &replayTransport{Transport: t, first: first}
 		protocol := route(first)
-		logger.Debug(fmt.Sprintf("Serving %s over %s", remote, protocol))
+		logger.Debugf("Serving %s over %s", remote, protocol)
 		if protocol == SMB1 {
 			err = s.smb1.ServeConn(replay, remote)
 		} else {
@@ -276,7 +279,7 @@ func (s *Server) serveConn(t transport.Transport, remote net.Addr) {
 		}
 	}
 	if err != nil {
-		logger.Debug(fmt.Sprintf("Refusing %s: %v", remote, err))
+		logger.Debugf("Refusing %s: %v", remote, err)
 	}
 }
 

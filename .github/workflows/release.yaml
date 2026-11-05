@@ -47,7 +47,8 @@ jobs:
         run: |
           mkdir -p release
           OUTPUT_PATH="release/${BINARY_NAME}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
-          go build -ldflags="-s -w" -o "$OUTPUT_PATH"
+          VERSION="${GITHUB_REF_NAME#v}"
+          go build -ldflags="-s -w -X main.version=${VERSION}" -o "$OUTPUT_PATH"
 
       - name: Upload the release binaries
         uses: svenstaro/upload-release-action@v2
