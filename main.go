@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/TheManticoreProject/smbserver/core/server"
 	"github.com/TheManticoreProject/smbserver/core/utils"
@@ -34,14 +35,16 @@ var (
 	debug bool
 
 	// Share
-	shareName string
-	sharePath string
-	readOnly  bool
+	shareName   string
+	sharePath   string
+	extraShares []string
+	readOnly    bool
 
 	// Network
 	listenAddress string
 	port          int
 	useNBT        bool
+	nbtPort       int
 	serverName    string
 
 	// Authentication
@@ -82,6 +85,7 @@ func parseArgs() {
 	// Share positionals
 	ap.NewStringPositionalArgument(&shareName, "shareName", "Name of the share.")
 	ap.NewStringPositionalArgument(&sharePath, "sharePath", "Local directory to serve.")
+	ap.NewListOfStringsArgument(&extraShares, "-s", "--share", nil, false, "Additional share as NAME=PATH; repeatable.")
 
 	// Network flags
 	group_network, err := ap.NewArgumentGroup("Network")
@@ -89,8 +93,9 @@ func parseArgs() {
 		logger.Warnf("Error creating ArgumentGroup: %s", err)
 	} else {
 		group_network.NewStringArgument(&listenAddress, "-ip", "--interface-address", "0.0.0.0", false, "Address to listen on.")
-		group_network.NewTcpPortArgument(&port, "-P", "--port", 0, false, "TCP port to listen on (default 445, or 139 with --nbt).")
-		group_network.NewBoolArgument(&useNBT, "", "--nbt", false, "Use NetBIOS (NBT) transport instead of direct TCP.")
+		group_network.NewTcpPortArgument(&port, "-P", "--port", 445, false, "Direct-TCP port; 0 disables direct TCP.")
+		group_network.NewBoolArgument(&useNBT, "", "--nbt", false, "Also listen for NetBIOS over TCP (Windows falls back to it).")
+		group_network.NewTcpPortArgument(&nbtPort, "", "--nbt-port", 139, false, "NetBIOS port used with --nbt.")
 		group_network.NewStringArgument(&serverName, "", "--server-name", "FILESRV", false, "NetBIOS name advertised to clients.")
 	}
 
@@ -155,21 +160,29 @@ func main() {
 		logger.SetLevel(logger.LevelDebug)
 	}
 
-	// NetBIOS is served on 139 and direct TCP on 445, unless a port was given.
-	if port == 0 {
-		port = 445
-		if useNBT {
-			port = 139
+	// Direct TCP is on unless -P 0; NetBIOS is added by --nbt. Both can run at once.
+	nbt := 0
+	if useNBT {
+		nbt = nbtPort
+	}
+
+	// The positional share is the primary one; --share adds more as NAME=PATH.
+	shares := []server.ShareSpec{{Name: shareName, Path: sharePath}}
+	for _, raw := range extraShares {
+		name, path, ok := strings.Cut(raw, "=")
+		if !ok || name == "" || path == "" {
+			logger.Errorf("Invalid --share %q, expected NAME=PATH", raw)
+			os.Exit(1)
 		}
+		shares = append(shares, server.ShareSpec{Name: name, Path: path})
 	}
 
 	options := server.Options{
-		ShareName:         shareName,
-		SharePath:         sharePath,
+		Shares:            shares,
 		ReadOnly:          readOnly,
 		ListenAddress:     listenAddress,
-		Port:              port,
-		UseNBT:            useNBT,
+		TCPPort:           port,
+		NBTPort:           nbt,
 		ServerName:        serverName,
 		Domain:            authDomain,
 		RequireSigning:    requireSigning,
@@ -201,6 +214,12 @@ func main() {
 
 	// Accept DOMAIN\user and DOMAIN/user; the embedded domain overrides -d.
 	if authUsername != "" {
+		if authPassword == "" && authHashes == "" {
+			logger.Warn("No password or hashes for the account: it will accept an empty password.")
+		}
+		if authPassword != "" && authHashes != "" {
+			logger.Warn("Both --password and --hashes given; using --hashes.")
+		}
 		domain, username := utils.SplitDomainUsername(authDomain, authUsername)
 		ntHash, err := utils.AccountHash(authPassword, authHashes)
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/TheManticoreProject/Manticore/crypto/spnego"
 	"github.com/TheManticoreProject/Manticore/crypto/spnego/ntlm/version"
@@ -18,17 +19,28 @@ import (
 	smb2 "github.com/TheManticoreProject/Manticore/network/smb/smb_v20/server"
 )
 
+// ShareSpec is one disk share to serve: a name clients connect to and the local
+// directory behind it.
+type ShareSpec struct {
+	Name string
+	Path string
+}
+
 // Options configures a Server.
 type Options struct {
-	ShareName string
-	SharePath string
-	ReadOnly  bool
+	// Shares are the disk shares served, in order; the first is the one named in
+	// logs. At least one is required.
+	Shares   []ShareSpec
+	ReadOnly bool
 
 	ListenAddress string
-	Port          int
-	UseNBT        bool
-	ServerName    string
-	Domain        string
+	// TCPPort is the direct-TCP (445) listener's port; 0 disables it. NBTPort is
+	// the NetBIOS-over-TCP (139) listener's port; 0 disables it. At least one must
+	// be set. A real server is reachable on both, since Windows falls back to 139.
+	TCPPort    int
+	NBTPort    int
+	ServerName string
+	Domain     string
 
 	// Account is the account served. Nil admits every logon as a guest, which is
 	// what a capture wants.
@@ -68,13 +80,17 @@ type Options struct {
 	OutputFile string
 }
 
-// Server serves one share over SMB1 and SMB2/3 on a single listener, routing
+// Server serves shares over SMB1 and SMB2/3 on one or more listeners, routing
 // each connection on its first NEGOTIATE, and harvests the NetNTLM response of
-// every logon on both.
+// every logon on both protocols.
 type Server struct {
 	options Options
 	smb1    *smb1.Server
 	smb2    *smb2.Server
+
+	mu        sync.Mutex
+	listeners []transport.Listener
+	closed    bool
 }
 
 // NewServer builds the SMB1 and SMB2 servers the options enable.
@@ -89,11 +105,9 @@ func NewServer(options Options) (*Server, error) {
 		return nil, fmt.Errorf("--require-signing and --require-encryption need an account (-u): a guest session derives no key to sign or encrypt with")
 	}
 
-	fs, err := smb1.NewLocalFileSystem(options.SharePath, options.ShareName)
-	if err != nil {
-		return nil, err
+	if len(options.Shares) == 0 {
+		return nil, fmt.Errorf("at least one share is required")
 	}
-	fs.SetReadOnly(options.ReadOnly)
 
 	// One capture handler for both protocols, so the output file and the
 	// per-user deduplication are shared. Known accounts are still served
@@ -171,10 +185,6 @@ func NewServer(options Options) (*Server, error) {
 		if options.LogFileAccess {
 			s.smb1.RegisterHandler(logSMB1FileAccess())
 		}
-		share := &smb1.Share{Name: options.ShareName, Type: smb1.ShareTypeDisk, FS: fs, ReadOnly: options.ReadOnly}
-		if err := s.smb1.AddShare(share); err != nil {
-			return nil, err
-		}
 		if options.Browsable {
 			// An IPC$ share answering srvsvc/wkssvc is what a client lists shares
 			// over; the SMB2 server has no pipe stack, so browsing is SMB1-only.
@@ -208,43 +218,127 @@ func NewServer(options Options) (*Server, error) {
 			s.smb2.RegisterHandler(logSMB2FileAccess())
 		}
 		s.smb2.RegisterHandler(capture)
-		// Both shares wrap the same fs, so file contents are consistent across
-		// protocols. Open state is not: share modes and oplocks are tracked per
-		// server, so an exclusive open over one protocol does not block the other.
-		// That is unusual in a capture, and Manticore keeps the two Share types
-		// apart, so they are left separate.
-		share := &smb2.Share{Name: options.ShareName, FS: fs, ReadOnly: options.ReadOnly}
-		if err := s.smb2.AddShare(share); err != nil {
+	}
+
+	// Each share's backend is built once and wrapped by both protocols, so file
+	// contents stay consistent. Open state (share modes, oplocks) is tracked per
+	// server and does not cross protocols — unusual in practice, and Manticore
+	// keeps the two Share types apart, so they are left separate.
+	for _, spec := range options.Shares {
+		fs, err := smb1.NewLocalFileSystem(spec.Path, spec.Name)
+		if err != nil {
 			return nil, err
+		}
+		fs.SetReadOnly(options.ReadOnly)
+		if s.smb1 != nil {
+			if err := s.smb1.AddShare(&smb1.Share{Name: spec.Name, Type: smb1.ShareTypeDisk, FS: fs, ReadOnly: options.ReadOnly}); err != nil {
+				return nil, err
+			}
+		}
+		if s.smb2 != nil {
+			if err := s.smb2.AddShare(&smb2.Share{Name: spec.Name, FS: fs, ReadOnly: options.ReadOnly}); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return s, nil
 }
 
-// ListenAndServe accepts connections until the listener fails.
+// ListenAndServe binds the configured listeners (direct TCP and/or NetBIOS) and
+// serves them until one fails or Close is called.
 func (s *Server) ListenAndServe() error {
-	addr := net.JoinHostPort(s.options.ListenAddress, strconv.Itoa(s.options.Port))
-	var listener transport.Listener
-	var err error
-	if s.options.UseNBT {
+	var listeners []transport.Listener
+	if s.options.TCPPort > 0 {
+		l, err := transport.ListenTCP(net.JoinHostPort(s.options.ListenAddress, strconv.Itoa(s.options.TCPPort)))
+		if err != nil {
+			return err
+		}
+		listeners = append(listeners, l)
+	}
+	if s.options.NBTPort > 0 {
 		// nil answers to any CALLED name, so a client coerced to \\anything\share
 		// over NetBIOS still reaches the server.
-		listener, err = transport.ListenNBT(addr, nil)
-	} else {
-		listener, err = transport.ListenTCP(addr)
-	}
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-
-	logger.Infof("Serving %s as \\\\%s\\%s on %s (%s)", s.options.SharePath, s.options.ServerName, s.options.ShareName, listener.Addr(), s.protocols())
-	for {
-		t, remote, err := listener.Accept()
+		l, err := transport.ListenNBT(net.JoinHostPort(s.options.ListenAddress, strconv.Itoa(s.options.NBTPort)), nil)
 		if err != nil {
-			return fmt.Errorf("failed to accept an SMB connection: %v", err)
+			closeAll(listeners)
+			return err
 		}
-		go s.serveConn(t, remote)
+		listeners = append(listeners, l)
+	}
+	if len(listeners) == 0 {
+		return fmt.Errorf("no listener enabled: set a TCP or NBT port")
+	}
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		closeAll(listeners)
+		return nil
+	}
+	s.listeners = listeners
+	s.mu.Unlock()
+
+	addrs := make([]string, len(listeners))
+	for i, l := range listeners {
+		addrs[i] = l.Addr().String()
+	}
+	logger.Infof("Serving %s on %s as \\\\%s (%s)", s.shareList(), strings.Join(addrs, ", "), s.options.ServerName, s.protocols())
+
+	// Accept on every listener; the first to fail returns, and the rest are
+	// closed on the way out. A Close-triggered failure reports no error.
+	errCh := make(chan error, len(listeners))
+	for _, l := range listeners {
+		go func(l transport.Listener) {
+			for {
+				t, remote, err := l.Accept()
+				if err != nil {
+					errCh <- err
+					return
+				}
+				go s.serveConn(t, remote)
+			}
+		}(l)
+	}
+
+	err := <-errCh
+	if s.isClosed() {
+		return nil
+	}
+	s.Close()
+	return fmt.Errorf("failed to accept an SMB connection: %v", err)
+}
+
+// Close stops the listeners and tears down the sub-servers and their live
+// connections. It is safe to call more than once and from any goroutine.
+func (s *Server) Close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	listeners := s.listeners
+	s.listeners = nil
+	s.mu.Unlock()
+
+	closeAll(listeners)
+	if s.smb1 != nil {
+		s.smb1.Close()
+	}
+	if s.smb2 != nil {
+		s.smb2.Close()
+	}
+}
+
+func (s *Server) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+func closeAll(listeners []transport.Listener) {
+	for _, l := range listeners {
+		l.Close()
 	}
 }
 
@@ -291,6 +385,15 @@ func (s *Server) protocols() string {
 		return "SMB1"
 	}
 	return "SMB1, SMB 2/3"
+}
+
+// shareList renders the served shares as "NAME=PATH, NAME=PATH" for the startup log.
+func (s *Server) shareList() string {
+	parts := make([]string, len(s.options.Shares))
+	for i, spec := range s.options.Shares {
+		parts[i] = spec.Name + "=" + spec.Path
+	}
+	return strings.Join(parts, ", ")
 }
 
 // passThroughCapture records the AUTHENTICATE leg of an SMB1 session setup and

@@ -34,10 +34,9 @@ func serveTestServer(t *testing.T) (int, string) {
 	listener.Close()
 
 	srv, err := NewServer(Options{
-		ShareName:     "FILES",
-		SharePath:     probe,
+		Shares:        []ShareSpec{{Name: "FILES", Path: probe}},
 		ListenAddress: "127.0.0.1",
-		Port:          port,
+		TCPPort:       port,
 		ServerName:    "FILESRV",
 		Domain:        "WORKGROUP",
 		EnableSMB1:    true,
